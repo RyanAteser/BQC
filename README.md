@@ -24,13 +24,7 @@ bash
 Copy code
 pip install numpy pandas matplotlib dwave-ocean-sdk dimod alpaca-trade-api
 Setup
-Clone the repository:
 
-bash
-Copy code
-git clone https://github.com/yourusername/quantum-finance-trading-bot.git
-cd quantum-finance-trading-bot
-Place your historical stock data CSV file (Historic_data_SPY.csv) in the data/ directory.
 
 Create a virtual environment and activate it:
 
