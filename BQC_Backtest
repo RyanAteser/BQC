@@ -1,0 +1,96 @@
+import numpy as np
+import pandas as pd
+import pickle
+import alpaca_trade_api as tradeapi
+from datetime import datetime, timedelta
+import time
+
+from BQC import identify_support_resistance, calculate_moving_averages, calculate_rsi, TradingEnv
+
+
+# Load the model
+def load_model(filename):
+    with open(filename, 'rb') as f:
+        agent, env = pickle.load(f)
+    return agent, env
+
+agent, env = load_model('model_episode_100.pkl')
+
+# Alpaca API credentials
+API_KEY = 'your_api_key'
+SECRET_KEY = 'your_secret_key'
+BASE_URL = 'https://paper-api.alpaca.markets'
+
+# Initialize Alpaca API
+api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
+
+# Function to fetch historical data
+def fetch_historical_data(symbol, start_date, end_date):
+    barset = api.get_barset(symbol, 'day', start=start_date, end=end_date)
+    bars = barset[symbol]
+    data = {
+        'Date': [bar.t for bar in bars],
+        'Open': [bar.o for bar in bars],
+        'High': [bar.h for bar in bars],
+        'Low': [bar.l for bar in bars],
+        'Close': [bar.c for bar in bars],
+        'Volume': [bar.v for bar in bars]
+    }
+    df = pd.DataFrame(data)
+    df.set_index('Date', inplace=True)
+    return df
+
+# Function to fetch the latest market data
+def fetch_latest_data(symbol):
+    barset = api.get_barset(symbol, 'minute', limit=1)
+    bar = barset[symbol][0]
+    return {
+        'Close/Last': bar.c,
+        'High': bar.h,
+        'Low': bar.l,
+        'Volume': bar.v
+    }
+
+# Paper trading function
+def paper_trade(symbol, model, days=30):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=60)  # Fetch 60 days of data for initial state
+
+    # Fetch historical data to initialize the environment
+    data = fetch_historical_data(symbol, start_date.isoformat(), end_date.isoformat())
+    data['Pct_Change'] = data['Close'].pct_change() * 100
+    data = identify_support_resistance(data)
+    data = calculate_moving_averages(data)
+    data = calculate_rsi(data)
+    env = TradingEnv(data)
+
+    balance = 10000
+    position = 0
+
+    for day in range(days):
+        current_state = env.reset()
+        for minute in range(390):  # 390 minutes in a trading day
+            latest_data = fetch_latest_data(symbol)
+            current_state.update(latest_data)
+            action = model.get_action(current_state)
+
+            if action == 0 and balance > 0:  # Buy
+                position = balance / latest_data['Close/Last']
+                balance = 0
+                print(f"Day {day + 1}, Minute {minute + 1}: Bought at {latest_data['Close/Last']}")
+            elif action == 1 and position > 0:  # Sell
+                balance = position * latest_data['Close/Last']
+                position = 0
+                print(f"Day {day + 1}, Minute {minute + 1}: Sold at {latest_data['Close/Last']}")
+            elif action == 2 and position > 0:  # Stop-loss
+                if (balance / position - latest_data['Close/Last']) / balance <= -0.1:
+                    balance = position * latest_data['Close/Last']
+                    position = 0
+                    print(f"Day {day + 1}, Minute {minute + 1}: Stop-loss at {latest_data['Close/Last']}")
+
+            time.sleep(60)  # Wait for the next minute
+
+        print(f"End of Day {day + 1}: Balance = {balance}, Position = {position}")
+
+# Run the paper trading for 30 days
+paper_trade('SPY', agent, days=30)
