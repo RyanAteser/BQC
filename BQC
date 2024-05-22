@@ -1,0 +1,227 @@
+import os
+import pickle
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from dwave.system import LeapHybridSampler
+os.environ["DWAVE_API_TOKEN"] = "TOKEN"
+
+# Load your stock data
+data = pd.read_csv('data/Historic_data_SPY.csv')
+data['Date'] = pd.to_datetime(data['Date'])
+data.set_index('Date', inplace=True)
+data.sort_index(inplace=True)  # Ensure the DataFrame is sorted by Date
+
+# Calculate percentage changes
+data['Pct_Change'] = data['Close/Last'].pct_change() * 100
+
+def identify_support_resistance(data, window=20):
+    data['Support'] = data['Low'].rolling(window=window).min()
+    data['Resistance'] = data['High'].rolling(window=window).max()
+    return data
+
+data = identify_support_resistance(data)
+
+def calculate_moving_averages(data, short_window=20, long_window=50):
+    data['Short_MA'] = data['Close/Last'].rolling(window=short_window).mean()
+    data['Long_MA'] = data['Close/Last'].rolling(window=long_window).mean()
+    return data
+
+def calculate_rsi(data, window=14):
+    delta = data['Close/Last'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    return data
+
+data = calculate_moving_averages(data)
+data = calculate_rsi(data)
+
+def forecast_next_day(data):
+    data['Forecasted_Price'] = np.nan
+    for i in range(1, len(data)):
+        if data['Close/Last'].iloc[i-1] <= data['Support'].iloc[i-1]:
+            data.loc[data.index[i], 'Forecasted_Price'] = data['Close/Last'].iloc[i-1] * 1.01  # Predict a small increase
+        elif data['Close/Last'].iloc[i-1] >= data['Resistance'].iloc[i-1]:
+            data.loc[data.index[i], 'Forecasted_Price'] = data['Close/Last'].iloc[i-1] * 0.99  # Predict a small decrease
+        else:
+            data.loc[data.index[i], 'Forecasted_Price'] = data['Close/Last'].iloc[i-1]  # Predict no change
+    return data
+
+data = forecast_next_day(data)
+
+def calculate_errors(data):
+    data = data.dropna(subset=['Forecasted_Price'])
+    data['Error'] = data['Forecasted_Price'] - data['Close/Last']
+
+    rmse = np.sqrt(np.mean(data['Error'] ** 2))
+    mad = np.mean(np.abs(data['Error']))
+    mape = np.mean(np.abs(data['Error'] / data['Close/Last'])) * 100
+
+    return rmse, mad, mape
+
+# Quantum Annealing Agent
+class QuantumAnnealingAgent:
+    def __init__(self):
+        self.hybrid_sampler = LeapHybridSampler()
+
+    def get_action(self, state):
+        current_price = state['Close/Last']
+        support = state['Support']
+        resistance = state['Resistance']
+        short_ma = state['Short_MA']
+        long_ma = state['Long_MA']
+        rsi = state['RSI']
+
+        # Define the QUBO
+        Q = {(0, 0): current_price, (1, 1): support, (2, 2): resistance, (3, 3): short_ma, (4, 4): long_ma, (5, 5): rsi,
+             (0, 1): -0.5, (0, 2): 0.5, (1, 3): -0.5, (2, 4): 0.5, (3, 5): -0.5}
+
+        response = self.hybrid_sampler.sample_qubo(Q)
+        solution = response.first.sample
+        action = solution.get(0, 2)  # Use the first qubit to determine the action, default to 'Hold' if no solution
+
+        return action
+
+# Trading Environment for Advanced Support and Resistance Strategy
+class TradingEnv:
+    def __init__(self, data):
+        self.data = data
+        self.n_steps = len(data)
+        self.current_step = 0
+        self.balance = 10000  # Initial balance
+        self.position = 0  # Current position
+        self.total_profit = 0
+        self.trades = []  # Track trades
+
+    def reset(self):
+        self.current_step = 0
+        self.balance = 10000
+        self.position = 0
+        self.total_profit = 0
+        self.trades = []  # Reset trades
+        return self.get_state()
+
+    def get_state(self):
+        state = self.data.iloc[self.current_step]
+        return state
+
+    def step(self, action):
+        reward = 0
+        done = False
+        current_price = self.data.iloc[self.current_step]['Close/Last']
+        support = self.data.iloc[self.current_step]['Support']
+        resistance = self.data.iloc[self.current_step]['Resistance']
+
+        print(f"Step {self.current_step}: Price={current_price}, Support={support}, Resistance={resistance}, Action={action}")
+
+        if action == 0:  # Buy
+            if self.position == 0 and current_price <= support * 1.01:  # Add buffer
+                self.position = self.balance / current_price
+                self.balance = 0
+                self.trades.append((self.data.index[self.current_step], 'buy', current_price))
+                print(f"Bought at {current_price}")
+        elif action == 1:  # Sell
+            if self.position > 0 and current_price >= resistance * 0.99:  # Add buffer
+                self.balance = self.position * current_price
+                profit = self.balance - 10000
+                self.total_profit += profit
+                self.position = 0
+                reward = profit
+                self.trades.append((self.data.index[self.current_step], 'sell', current_price))
+                print(f"Sold at {current_price}")
+        elif action == 2:  # Hold
+            if self.position > 0 and self.balance > 0 and (self.balance / self.position - current_price) / self.balance <= -0.1:  # Stop-loss
+                self.balance = self.position * current_price
+                self.position = 0
+                self.trades.append((self.data.index[self.current_step], 'sell', current_price))
+                print(f"Stop-loss at {current_price}")
+
+        self.current_step += 1
+        if self.current_step >= self.n_steps:
+            done = True
+            next_state = self.data.iloc[-1]  # Return the last row if done
+        else:
+            next_state = self.data.iloc[self.current_step]
+
+        return next_state, reward, done
+
+# Initialize the trading environment and the quantum annealing agent
+env = TradingEnv(data)
+agent = QuantumAnnealingAgent()
+
+# Training parameters
+episodes = 100
+epsilon = 0.1  # Small random exploration
+
+def train(env, agent, episodes, epsilon):
+    for episode in range(episodes):
+        state = env.reset()
+        print(f"Episode {episode+1}/{episodes} - Initial State: {state['Close/Last']}")
+
+        for time in range(env.n_steps):
+            if np.isnan(state['Support']) or np.isnan(state['Resistance']):
+                # If support or resistance is NaN, take a default action (e.g., Hold)
+                action = 2
+            else:
+                if np.random.rand() <= epsilon:
+                    action = np.random.choice([0, 1, 2])
+                else:
+                    action = agent.get_action(state)
+
+            next_state, reward, done = env.step(action)
+            print(f"Profit: {env.total_profit}")
+            state = next_state
+            if done:
+                print(f"Episode {episode+1}/{episodes} - Total Profit: {env.total_profit}")
+                break
+
+        # Save the model after each episode
+        with open(f'model_episode_{episode+1}.pkl', 'wb') as f:
+            pickle.dump((agent, env), f)
+
+train(env, agent, episodes, epsilon)
+
+# Function to load the model for testing
+def load_model(filename):
+    with open(filename, 'rb') as f:
+        agent, env = pickle.load(f)
+    return agent, env
+
+# Example usage to load the model and test
+# loaded_agent, loaded_env = load_model('model_episode_100.pkl')
+
+# Plotting the results
+def plot_results(data, trades, total_profit, start_date=None, end_date=None):
+    plt.figure(figsize=(14, 7))
+
+    if start_date and end_date:
+        data = data[start_date:end_date]
+
+    plt.plot(data['Close/Last'], label='Actual Price')
+    plt.plot(data['Support'], label='Support', linestyle='--')
+    plt.plot(data['Resistance'], label='Resistance', linestyle='--')
+    plt.plot(data['Forecasted_Price'], label='Forecasted Price', linestyle='--')
+    plt.plot(data['Short_MA'], label='Short MA', linestyle='-')
+    plt.plot(data['Long_MA'], label='Long MA', linestyle='-')
+    plt.plot(data['RSI'], label='RSI', linestyle='-')
+
+    buys = [trade[0] for trade in trades if trade[1] == 'buy' and trade[0] >= data.index[0] and trade[0] <= data.index[-1]]
+    sells = [trade[0] for trade in trades if trade[1] == 'sell' and trade[0] >= data.index[0] and trade[0] <= data.index[-1]]
+    plt.scatter(buys, data.loc[buys]['Close/Last'], marker='^', color='g', label='Buy')
+    plt.scatter(sells, data.loc[sells]['Close/Last'], marker='v', color='r', label='Sell')
+
+    plt.legend()
+    plt.title('Actual vs Forecasted Stock Prices with Support and Resistance')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.show()
+
+# Example usage with a specific date range
+plot_results(data, env.trades, env.total_profit, start_date='2022-01-01', end_date='2022-12-31')
+
+# Calculate errors
+rmse, mad, mape = calculate_errors(data)
+print(f"RMSE: {rmse}, MAD: {mad}, MAPE: {mape}%")
