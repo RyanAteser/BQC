@@ -75,5 +75,3 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 Acknowledgments
 Alpaca for providing the API for live trading data.
 D-Wave for the quantum annealing technology.
-OpenAI for the GPT-4 model used in generating this README.
-Feel free to customize this README as needed for your project.
